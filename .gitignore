@@ -18,6 +18,9 @@ Thumbs.db
 .env
 
 # Secrets - Do not commit secrets!
+.aws/
+credentials 
+config
 *.pem
 *.key
 
