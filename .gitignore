@@ -1,0 +1,27 @@
+# Virtual Environment
+venv/
+.venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editor/OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Environment variables file
+.env
+
+# Secrets - Do not commit secrets!
+*.pem
+*.key
+
+# Build artifacts / distribution
+dist/
+build/
+*.egg-info/
