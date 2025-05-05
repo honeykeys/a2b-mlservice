@@ -7,10 +7,10 @@ import sys
 from pathlib import Path
 import boto3
 import numpy as np
-import time # Added for load timing example
+import time
 import traceback
 
-print('Starting prediction script...')
+print('Starting prediction script (Points & Price)...')
 
 # --- Configuration ---
 try:
@@ -19,40 +19,51 @@ try:
     print(f"Detected Project Root: {PROJECT_ROOT}")
 
     # --- Paths to Input Artifacts (MUST be correct) ---
-    # Assumes ETL output this parquet file with features ready for prediction
     PROCESSED_DATA_PATH = PROJECT_ROOT / 'data' / 'processed' / 'fpl_analytics_mvp_v1.parquet'
-    # Assumes model training saved this file
-    MODEL_PATH = PROJECT_ROOT / 'models' / 'dt_model_v1.joblib' # <-- Point to your chosen model file
+    POINTS_MODEL_PATH = PROJECT_ROOT / 'models' / 'dt_model_v1.joblib'       # <-- Verify/Update
+    PRICE_MODEL_PATH = PROJECT_ROOT / 'models' / 'price_predictor_rf_v1.joblib' # <-- Verify/Update
 
     # --- Output Configuration ---
     PREDICTIONS_OUTPUT_DIR = PROJECT_ROOT / 'data' / 'predictions'
-    # S3 Bucket where predictions will be uploaded
-    S3_BUCKET_NAME = 'a2b-ml-artifacts-kn-euw2-20250504' # <-- Use YOUR bucket name
+    S3_BUCKET_NAME = 'a2b-ml-artifacts-kn-euw2-20250504' # <-- Verify/Update
 
-    # <<< --- CRITICAL: Update this list to match your trained model EXACTLY --- >>>
-    FEATURE_COLUMNS = [
+    # <<< --- CRITICAL: Update FEATURE lists to match respective trained models EXACTLY --- >>>
+    POINTS_FEATURE_COLUMNS = [
+        # Features used to train dt_model_v1.joblib
         'minutes_lag_1',
         'points_lag_1',
         'fdr',
         'was_home',
-        # Add ALL other features your chosen model expects in the correct order!
+        # ... add all others for points model ...
+    ]
+    PRICE_FEATURE_COLUMNS = [
+        # Features used to train price_predictor_rf_v1.joblib
+        'transfers_balance_lag_1',
+        'net_transfers_roll_3',
+        'selected_lag_1',
+        'points_lag_1',
+        'cost',
+        'chance_playing_prev_gw_forecast', # Include if available and used
+        # ... add all others for price model ...
     ]
 
     # Columns to keep in the final output file alongside predictions
     # Ensure these columns EXIST in your PROCESSED_DATA_PATH parquet file!
-    IDENTIFIER_COLUMNS = ['element', 'web_name', 'position', 'player_static_team', 'gameweek', 'season']
+    IDENTIFIER_COLUMNS = ['element', 'web_name', 'position', 'player_static_team', 'gameweek', 'season', 'cost'] # Added cost here too
 
 except Exception as e:
     print(f"Error during initial configuration: {e}", file=sys.stderr)
     sys.exit(1)
 
 
-def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket):
+def generate_predictions(processed_data_file,
+                         points_model_path, price_model_path,
+                         output_dir, s3_bucket):
     """
-    Loads processed data & model, predicts points for the next available gameweek,
-    saves predictions locally, and uploads to S3.
+    Loads processed data & models, predicts points & price changes for the
+    next available gameweek, saves combined predictions locally, and uploads to S3.
     """
-    print("\n--- Starting Prediction Generation Function ---")
+    print("\n--- Starting Prediction Generation Function (Points & Price) ---")
     start_time_total = time.time()
 
     # --- Load Processed Data ---
@@ -62,40 +73,45 @@ def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket)
             raise FileNotFoundError(f"Processed data file not found: {processed_data_file}")
         df = pd.read_parquet(processed_data_file)
         print(f"Loaded processed data shape: {df.shape}")
-        required_load_cols = ['gameweek'] + IDENTIFIER_COLUMNS + FEATURE_COLUMNS
-        missing_load_cols = [col for col in required_load_cols if col not in df.columns]
+
+        # Verify necessary columns exist for features, target checks, identifiers
+        all_required_cols = list(set(
+            POINTS_FEATURE_COLUMNS + PRICE_FEATURE_COLUMNS + IDENTIFIER_COLUMNS + ['gameweek', 'season']
+        ))
+        missing_load_cols = [col for col in all_required_cols if col not in df.columns]
         if missing_load_cols:
             raise KeyError(f"Required columns missing after load: {missing_load_cols}")
-        # Ensure gameweek is numeric for filtering/finding max
-        df['gameweek'] = pd.to_numeric(df['gameweek'], errors='coerce')
-        df.dropna(subset=['gameweek'], inplace=True)
-        df['gameweek'] = df['gameweek'].astype(int)
+
+        df['gameweek'] = pd.to_numeric(df['gameweek'], errors='coerce').fillna(0).astype(int)
 
     except Exception as e:
         print(f"Error loading processed data: {e}", file=sys.stderr)
         print(traceback.format_exc())
         return False
 
-    # --- Load Model ---
+    # --- Load Models ---
     try:
-        print(f"Loading model from: {model_file}")
-        if not model_file.is_file():
-            raise FileNotFoundError(f"Model file not found: {model_file}")
-        model = joblib.load(str(model_file)) # joblib might prefer string path
-        print(f"Successfully loaded model: {type(model)}")
+        print(f"Loading points model from: {points_model_path}")
+        if not points_model_path.is_file(): raise FileNotFoundError(f"Points model not found: {points_model_path}")
+        points_model = joblib.load(str(points_model_path))
+        print(f"Successfully loaded points model: {type(points_model)}")
+
+        print(f"Loading price model from: {price_model_path}")
+        if not price_model_path.is_file(): raise FileNotFoundError(f"Price model not found: {price_model_path}")
+        price_model = joblib.load(str(price_model_path))
+        print(f"Successfully loaded price model: {type(price_model)}")
     except Exception as e:
-        print(f"Error loading model: {e}", file=sys.stderr)
+        print(f"Error loading models: {e}", file=sys.stderr)
         print(traceback.format_exc())
         return False
 
     # --- Determine Target Gameweek ---
-    # Assumption: The Parquet file contains rows ready for prediction.
-    # We predict for the EARLIEST gameweek present in this file.
-    # (Alternatively, could find max historical GW and predict GW+1 if file structure differs)
+    # Assuming the parquet file contains rows with features ready for next prediction
     if df.empty:
         print("Error: Processed data frame is empty.", file=sys.stderr)
         return False
     try:
+        # Predict for the minimum gameweek present in the prepared data file
         target_gw = int(df['gameweek'].min())
         print(f"Identified target prediction Gameweek: {target_gw}")
         prediction_df = df[df['gameweek'] == target_gw].copy()
@@ -103,44 +119,35 @@ def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket)
              print(f"Error: No data found for target Gameweek {target_gw} in the processed file.", file=sys.stderr)
              return False
     except Exception as e:
-        print(f"Error determining target gameweek: {e}", file=sys.stderr)
+        print(f"Error determining target gameweek or filtering data: {e}", file=sys.stderr)
         print(traceback.format_exc())
         return False
 
-    # --- Prepare Features (X_predict) ---
-    print(f"Preparing features for GW {target_gw}...")
+    # --- Prepare Features & Predict ---
     try:
-        # Verify all needed feature columns are present in the filtered data
-        missing_features = [col for col in FEATURE_COLUMNS if col not in prediction_df.columns]
-        if missing_features:
-            raise ValueError(f"Required feature columns missing from filtered data: {missing_features}")
+        print(f"Preparing features and predicting for GW {target_gw}...")
+        # Points Prediction
+        X_predict_points = prediction_df[POINTS_FEATURE_COLUMNS].copy()
+        # Add any preprocessing/NaN checks needed for points model input
+        if X_predict_points.isnull().sum().sum() > 0:
+             print("Warning: NaNs found in points features. Filling with 0.", file=sys.stderr)
+             X_predict_points.fillna(0, inplace=True) # Basic Imputation
+        print(f"Generating points predictions ({X_predict_points.shape[0]} players)...")
+        y_pred_points = points_model.predict(X_predict_points)
 
-        X_predict = prediction_df[FEATURE_COLUMNS]
+        # Price Prediction
+        X_predict_price = prediction_df[PRICE_FEATURE_COLUMNS].copy()
+        # Add any preprocessing/NaN checks needed for price model input
+        if X_predict_price.isnull().sum().sum() > 0:
+             print("Warning: NaNs found in price features. Filling with 0.", file=sys.stderr)
+             X_predict_price.fillna(0, inplace=True) # Basic Imputation
+        print(f"Generating price change predictions ({X_predict_price.shape[0]} players)...")
+        y_pred_price = price_model.predict(X_predict_price)
 
-        # Ensure data types match training (basic numeric check)
-        for col in X_predict.columns:
-            X_predict[col] = pd.to_numeric(X_predict[col], errors='coerce')
-
-        if X_predict.isnull().sum().sum() > 0:
-            print("Warning: NaNs found in features before prediction. Filling with 0 for now.", file=sys.stderr)
-            print(X_predict.isnull().sum())
-            # Basic Imputation - replace with more sophisticated strategy if needed
-            X_predict.fillna(0, inplace=True)
+        print("Predictions generated successfully.")
 
     except Exception as e:
-        print(f"Error preparing features: {e}", file=sys.stderr)
-        print(traceback.format_exc())
-        return False
-
-    # --- Generate Predictions ---
-    try:
-        print(f"Generating predictions using {type(model).__name__}...")
-        start_time_pred = time.time()
-        y_pred = model.predict(X_predict)
-        pred_time = time.time() - start_time_pred
-        print(f"Predictions generated in {pred_time:.2f}s.")
-    except Exception as e:
-        print(f"Error during prediction: {e}", file=sys.stderr)
+        print(f"Error preparing features or during prediction: {e}", file=sys.stderr)
         print(traceback.format_exc())
         return False
 
@@ -148,19 +155,18 @@ def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket)
     try:
         print("Formatting and saving output...")
         output_df = prediction_df[IDENTIFIER_COLUMNS].copy()
-        # Add predictions, ensuring index aligns if X_predict was filtered/modified
-        output_df['predicted_points'] = y_pred
-        output_df['predicted_points'] = np.round(output_df['predicted_points'], 2) # Round to 2 decimal places
+        output_df['predicted_points'] = np.round(y_pred_points, 2)
+        output_df['predicted_price_change'] = np.round(y_pred_price, 2) # Price changes often small
 
         # Ensure output directory exists
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Define output filenames
+        # Define output filename
         local_filename = output_dir / f"predictions_gw{target_gw}.json"
         s3_key_specific = f"predictions/gw{target_gw}/predictions.json"
-        s3_key_latest = "predictions/latest_predictions.json"
+        s3_key_latest = "predictions/latest_predictions.json" # Overwrites each week
 
-        print(f"Saving predictions locally to: {local_filename}")
+        print(f"Saving combined predictions locally to: {local_filename}")
         output_df.to_json(local_filename, orient='records', indent=2)
         print("Local save successful.")
 
@@ -175,7 +181,6 @@ def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket)
         print(f"Uploading {local_filename} to s3://{s3_bucket}/{s3_key_latest}...")
         s3_client.upload_file(str(local_filename), s3_bucket, s3_key_latest)
         print("  Upload to latest key successful.")
-        # --- End S3 Upload Logic ---
 
         total_time = time.time() - start_time_total
         print(f"\nPredictions saved locally and uploaded successfully. Total time: {total_time:.2f}s.")
@@ -193,13 +198,14 @@ def generate_predictions(processed_data_file, model_file, output_dir, s3_bucket)
 # --- Main Execution ---
 if __name__ == "__main__":
     print("="*50)
-    print("Starting Offline Prediction Generation Job")
+    print("Starting Offline Prediction Generation Job (Points & Price)")
     print("="*50)
 
     # Pass the S3 bucket name to the function
     success = generate_predictions(
         processed_data_file=PROCESSED_DATA_PATH,
-        model_file=MODEL_PATH,
+        points_model_path=POINTS_MODEL_PATH,
+        price_model_path=PRICE_MODEL_PATH,
         output_dir=PREDICTIONS_OUTPUT_DIR,
         s3_bucket=S3_BUCKET_NAME
     )
