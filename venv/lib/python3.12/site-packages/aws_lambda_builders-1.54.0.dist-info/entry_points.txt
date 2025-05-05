@@ -1,0 +1,2 @@
+[console_scripts]
+lambda-builders = aws_lambda_builders.__main__:main
