@@ -6,47 +6,9 @@ import os
 import sys
 
 def clean_and_merge_data(raw_data):
-    """
-    Cleans and merges raw FPL dataframes (gws, players, fixtures)
-    across specified seasons into a single DataFrame ready for feature engineering.
-
-    Args:
-        raw_data (dict): The dictionary of raw dataframes loaded in Task 1.
-                         Expected keys per season: 'gws', 'players', 'fixtures'.
-
-    Returns:
-        pandas.DataFrame or None: A single merged and cleaned DataFrame,
-                                 or None if critical steps fail.
-    """
-    print("\n--- Starting Task 2: Cleaning & Merging ---")
-
     if not raw_data:
         print("Error: Input raw_data dictionary is empty or None.", file=sys.stderr)
         return None
-
-    # --- Initial Debug Print of Raw Columns ---
-    print("DEBUG: Checking raw input columns...")
-    try:
-        # Use last season loaded as example - assumes structure is consistent
-        last_season = sorted(list(raw_data.keys()))[-1]
-        raw_players_df = raw_data.get(last_season, {}).get('players')
-        raw_gws_df = raw_data.get(last_season, {}).get('gws')
-        raw_fixtures_df = raw_data.get(last_season, {}).get('fixtures')
-
-        if raw_players_df is not None:
-            print(f"  Raw 'players' columns ({last_season}):", raw_players_df.columns.tolist())
-        else: print(f"  Raw 'players' data missing for season {last_season}.")
-        if raw_gws_df is not None:
-             print(f"  Raw 'gws' columns ({last_season}):", raw_gws_df.columns.tolist())
-        else: print(f"  Raw 'gws' data missing for season {last_season}.")
-        if raw_fixtures_df is not None:
-             print(f"  Raw 'fixtures' columns ({last_season}):", raw_fixtures_df.columns.tolist())
-        else: print(f"  Raw 'fixtures' data missing for season {last_season}.")
-    except Exception as e_debug:
-        print(f"  DEBUG Error checking raw columns: {e_debug}")
-    # --- End Debug Prints ---
-
-
     # --- 1. Combine Data Across Seasons ---
     gws_dfs = []
     players_dfs = []
@@ -63,9 +25,6 @@ def clean_and_merge_data(raw_data):
             gws_dfs.append(df_gws)
         else: print(f"  Warning: Missing or empty 'gws' data for season {season}", file=sys.stderr)
 
-        # We likely only need one definitive source for player/fixture info, often the latest season's is sufficient
-        # unless merging season-specific details. Let's plan to use the *last* season's players/fixtures for merging.
-        # Alternatively, concat all and deduplicate if IDs are consistent. Concat/dedupe is safer.
         if 'players' in raw_data[season] and isinstance(raw_data[season]['players'], pd.DataFrame) and not raw_data[season]['players'].empty:
             df_players = raw_data[season]['players'].copy()
             df_players['season'] = season
@@ -78,7 +37,6 @@ def clean_and_merge_data(raw_data):
             fixtures_dfs.append(df_fixtures)
         else: print(f"  Warning: Missing or empty 'fixtures' data for season {season}", file=sys.stderr)
 
-    # Concatenate into single dataframes
     if not gws_dfs:
         print("Error: No gameweek data found to process.", file=sys.stderr)
         return None
@@ -93,82 +51,64 @@ def clean_and_merge_data(raw_data):
     print(f"Combined Fixtures DataFrame shape: {all_fixtures_df.shape}")
 
 
-    # --- 2. Merge DataFrames ---
     print("\nMerging datasets...")
-    # --- CHECKPOINT: Verify these key column names match your RAW data output ---
-    player_gw_key = 'element'           # Key for player in gameweek data
-    player_info_key = 'id'              # Key for player in players_raw data
-    fixture_gw_key = 'fixture'          # Key for fixture in gameweek data
-    fixture_info_key = 'id'             # Key for fixture in fixtures data
-    ownership_col_raw = 'selected_by_percent' # Source column for ownership % (Check raw players cols)
-    play_chance_col_raw = 'chance_of_playing_next_round' # Source column for play chance (Check raw players cols)
-    player_team_col_raw = 'team'        # Source column for team ID in players_raw
-    player_name_col_raw = 'web_name'    # Source column for player display name
-    position_col_raw = 'element_type'   # Source column for player position ID
+    player_gw_key = 'element'           
+    player_info_key = 'id'              
+    fixture_gw_key = 'fixture'          
+    fixture_info_key = 'id'             
+    ownership_col_raw = 'selected_by_percent' 
+    play_chance_col_raw = 'chance_of_playing_next_round' 
+    player_team_col_raw = 'team'       
+    player_name_col_raw = 'web_name'    
+    position_col_raw = 'element_type'   
 
     merged_df = all_gws_df
 
-    # --- Merge player information ---
     if not all_players_df.empty and player_info_key in all_players_df.columns and player_gw_key in merged_df.columns:
         print(f"  Preparing player info merge...")
-
-        # --- CHECKPOINT: Ensure ALL columns needed exist in all_players_df and are listed here ---
         player_cols_to_select = [
             player_info_key,
             position_col_raw,
             player_name_col_raw,
             player_team_col_raw,
-            ownership_col_raw, # Make sure this exact name exists
-            play_chance_col_raw # Make sure this exact name exists
+            ownership_col_raw, 
+            play_chance_col_raw 
         ]
-        # Filter list based on actual columns present to avoid KeyErrors
         actual_player_cols_to_select = [col for col in player_cols_to_select if col in all_players_df.columns]
         if len(actual_player_cols_to_select) < len(player_cols_to_select):
              print(f"Warning: Could not find all desired player columns! Missing: {set(player_cols_to_select) - set(actual_player_cols_to_select)}", file=sys.stderr)
 
         if player_info_key not in actual_player_cols_to_select:
              print(f"Error: Player info key '{player_info_key}' not found in player data columns.", file=sys.stderr)
-             return None # Cannot merge without the key
+             return None 
 
         player_info_subset = all_players_df[actual_player_cols_to_select]
 
-        # Deduplicate: Get the most recent info for each player ID if seasons were combined
         if 'season' in player_info_subset.columns:
              player_info_subset = player_info_subset.sort_values(by='season', ascending=False)
         players_to_merge = player_info_subset.drop_duplicates(subset=[player_info_key], keep='first')
 
         print(f"  DEBUG: Columns in players_to_merge:", players_to_merge.columns.tolist())
 
-        # Rename columns before merge to avoid clashes
+       
         rename_dict = {player_info_key: player_gw_key, player_team_col_raw: 'player_static_team'}
-        # Add renames for ownership/chance if their raw names differ from desired final names
-        # Example: if raw name is 'selected', but we want 'selected_by_percent'
-        # if ownership_col_raw == 'selected' and 'selected' in players_to_merge.columns :
-        #     rename_dict['selected'] = 'selected_by_percent'
-        # if play_chance_col_raw == 'status' and 'status' in players_to_merge.columns:
-        #      rename_dict['status'] = 'chance_of_playing_next_round' # Careful, status might mean something else
 
         players_to_merge = players_to_merge.rename(columns=rename_dict)
 
         merged_df = pd.merge(
             merged_df,
-            players_to_merge, # Use the renamed, deduplicated, selected columns
+            players_to_merge,
             on=player_gw_key,
             how='left'
         )
         print(f"Shape after merging player info: {merged_df.shape}")
-        print(f"  DEBUG: Columns AFTER player merge:", merged_df.columns.tolist())
-        # Check if the target columns (using final names) are now present
-        print(f"    'selected_by_percent' present: {'selected_by_percent' in merged_df.columns}")
-        print(f"    'chance_of_playing_next_round' present: {'chance_of_playing_next_round' in merged_df.columns}")
 
     else:
         print("Warning: Skipping player info merge - required DFs or columns missing/empty.", file=sys.stderr)
 
-    # --- Merge fixture information ---
+
     if not all_fixtures_df.empty and fixture_info_key in all_fixtures_df.columns and fixture_gw_key in merged_df.columns:
         print(f"\n  Merging fixture info...")
-        # --- CHECKPOINT: Add any other fixture columns needed ---
         fixture_cols_to_select = [fixture_info_key, 'team_h_difficulty', 'team_a_difficulty', 'team_h_score', 'team_a_score']
         actual_fixture_cols = [col for col in fixture_cols_to_select if col in all_fixtures_df.columns]
         if len(actual_fixture_cols) < len(fixture_cols_to_select):
@@ -190,8 +130,7 @@ def clean_and_merge_data(raw_data):
         print("Warning: Skipping fixture info merge - required DFs or columns missing/empty.", file=sys.stderr)
 
 
-    # --- 3. Basic Cleaning on Merged DataFrame ---
-    # Assign final DataFrame name
+
     cleaned_merged_df = merged_df.copy()
     print("\nPerforming basic cleaning on merged data...")
 

@@ -3,7 +3,7 @@ import os
 
 # --- Configuration ---
 # <<< --- IMPORTANT: Set the correct path to YOUR dataset --- >>>
-BASE_DATA_PATH = '/Users/karlnuyda/Desktop/Fantasy-Premier-League/data' # Use your actual path
+BASE_DATA_PATH = os.environ.get('/Users/karlnuyda/Desktop/Fantasy-Premier-League/data') # Use your actual path
 SEASON = '2024-25'
 PROBLEM_FILE = os.path.join(BASE_DATA_PATH, SEASON, 'gws', 'merged_gw.csv')
 PROBLEM_LINE_NUMBER = 14180 # The line number reported in the error (1-based)

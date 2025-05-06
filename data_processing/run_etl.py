@@ -13,7 +13,7 @@ import numpy as np
 # that the fpl-ml-service root is in the Python path.
 # If running from root, imports might be: from data_processing.load_raw_data import ...
 try:
-    from load_raw_data import load_raw_fpl_data
+    from data_processing.load_raw_data import load_raw_fpl_data
     from clean_and_merge_data import clean_and_merge_data
     from feature_engineering import engineer_features # Assuming this function now returns the full processed_df
 except ImportError as e:
@@ -279,9 +279,6 @@ if __name__ == "__main__":
 
         except Exception as e:
             print(f"Error during Decision Tree training/evaluation: {e}", file=sys.stderr)
-
-
-
 
     print("\n--- ML Model Training/Evaluation Block Complete ---")
     print("\n--- ETL Pipeline Finished ---") # This remains the final line of the __main__ block

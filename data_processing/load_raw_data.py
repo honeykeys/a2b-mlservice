@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import sys # Optional: for exiting or writing to stderr
 
-BASE_DATA_PATH = '/Users/karlnuyda/Desktop/Fantasy-Premier-League/data'
+BASE_DATA_PATH = os.environ.get('/Users/karlnuyda/Desktop/Fantasy-Premier-League/data')
 
 # Define the seasons and the GW limit for the current season
 SEASONS = ['2023-24', '2024-25']
