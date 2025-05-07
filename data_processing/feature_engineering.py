@@ -134,32 +134,17 @@ def engineer_features(df):
     # Identify all columns created by shifting or rolling (these define the initial rows to drop)
     # Ensure this list includes key features needed for BOTH model types later
     essential_lagged_cols = [col for col in df_sorted.columns if '_lag_' in col or '_roll_' in col]
-    # Add specific essential lagged cols if not captured by name pattern:
-    # essential_lagged_cols.extend(['chance_playing_prev_gw_forecast']) # Example
-
-    # Only proceed if we actually created lagged columns
-    if essential_lagged_cols:
-        print(f"Dropping rows with NaN values in essential lagged/rolled features: {essential_lagged_cols}")
-        initial_rows = len(df_sorted)
-        # Use the identified list to drop rows missing crucial historical context
-        df_processed = df_sorted.dropna(subset=essential_lagged_cols).copy()
-        rows_dropped = initial_rows - len(df_processed)
-        print(f"Dropped {rows_dropped} rows due to NaNs in lagged/rolled features.")
-    else:
-        print("Warning: No lagged/rolled features identified for NaN handling.")
-        df_processed = df_sorted # Use df_sorted if no lagging was done
+    df_processed = df_sorted.copy() # Use the DataFrame with all rows
+    print(f"Shape BEFORE any NaN drop in engineer_features: {df_processed.shape}")
+    # If you still want to drop very early historical NaNs for cleanliness, you could do:
+    # if essential_lagged_cols:
+    #     df_processed.dropna(subset=essential_lagged_cols, how='all', inplace=True) # Drop if ALL are NaN
+    #     logging.info(f"Shape AFTER dropping rows where ALL essential lags are NaN: {df_processed.shape}")
 
     if df_processed.empty:
-        print("Error: DataFrame is empty after handling NaNs from lagging.", file=sys.stderr)
+        print("Error: DataFrame is empty after potential minimal NaN handling.", file=sys.stderr)
         return None
 
-    # --- 9. Final Type Checks / Cleanup (Optional) ---
-    # Example: Convert boolean was_home back if needed, ensure numeric types
-    # df_processed['was_home'] = df_processed['was_home'].astype(bool) # If needed later
-    # ...
-
-    print(f"Final processed DataFrame shape: {df_processed.shape}")
+    print(f"Final processed DataFrame shape (engineer_features): {df_processed.shape}")
     print("\n--- Feature Engineering Complete ---")
-    # RETURN THE FULL DATAFRAME containing everything needed
-    # Selection of X/y for specific models happens later in training scripts
     return df_processed

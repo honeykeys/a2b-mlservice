@@ -1,171 +1,256 @@
-# data_processing/load_raw_data.py (Refactored for HTTPS)
+# scheduling/load_raw_data_scheduled.py
 
 import pandas as pd
 import requests
 from io import StringIO # Used to read string data as a file
 import os
 import sys
-import time # For potential retries/backoff
+import time # For potential retries/backoff, not actively used yet
+import logging
+import numpy as np
+
+# --- Configure Logging ---
+# Ensures logs go to stdout/stderr, which CloudWatch captures from Fargate
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 # --- Configuration ---
 # Read Base URL from environment variable set in Task Definition
 RAW_DATA_BASE_URL = os.environ.get(
-    'RAW_DATA_BASE_URL', # Matches Task Def env var
-    'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data' # Default fallback
+    'RAW_DATA_BASE_URL',
+    'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data'
 )
-# Define request timeout
 REQUEST_TIMEOUT = 30 # seconds
 
+# Validate the Base URL early
+if not RAW_DATA_BASE_URL:
+    logging.critical("FATAL: RAW_DATA_BASE_URL environment variable not set.")
+    sys.exit("Exiting: Missing RAW_DATA_BASE_URL.")
+elif not RAW_DATA_BASE_URL.startswith(('http://', 'https://')):
+     logging.critical(f"FATAL: RAW_DATA_BASE_URL is missing scheme (http/https): {RAW_DATA_BASE_URL}")
+     sys.exit("Exiting: Invalid RAW_DATA_BASE_URL configuration.")
+
+# Clean base URL (remove trailing slash if present)
+cleaned_base_url = RAW_DATA_BASE_URL.rstrip('/')
+
+
 # --- Helper Function ---
-def fetch_csv_from_url(url):
-    """Fetches CSV content from a URL and returns a Pandas DataFrame."""
-    print(f"    Fetching: {url} ...")
+def fetch_csv_from_url(file_path_suffix):
+    """Fetches CSV content from a URL (base_url + suffix) and returns a Pandas DataFrame."""
+    url = f"{cleaned_base_url}/{file_path_suffix.lstrip('/')}"
+    logging.info(f"    Attempting to fetch: {url} ...")
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
         response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
 
-        # Check if content is empty before parsing
         if not response.text:
-             print(f"    Warning: Empty content received from {url}", file=sys.stderr)
-             return pd.DataFrame() # Return empty DataFrame
+             logging.warning(f"    Warning: Empty content received from {url}")
+             return pd.DataFrame()
 
-        # Use StringIO to read the text content as if it were a file
         csv_data = StringIO(response.text)
         df = pd.read_csv(csv_data)
-        print(f"    Successfully fetched and parsed. Shape: {df.shape}")
+        logging.info(f"    Successfully fetched and parsed {file_path_suffix}. Shape: {df.shape}")
         return df
     except requests.exceptions.Timeout:
-        print(f"    Error: Timeout occurred while fetching {url}", file=sys.stderr)
+        logging.error(f"    Error: Timeout occurred while fetching {url}")
         return None
     except requests.exceptions.HTTPError as http_err:
-         # Specifically check for 404 Not Found
          if http_err.response.status_code == 404:
-              print(f"    Info: File not found (404) at {url}. Skipping.")
-              return None
+              logging.info(f"    Info: File not found (404) at {url}. Will attempt shell creation if needed.")
+              return None # Indicate file not found for shell creation logic
          else:
-              print(f"    Error: HTTP error occurred: {http_err} for {url}", file=sys.stderr)
+              logging.error(f"    Error: HTTP error occurred: {http_err} for {url}")
               return None
     except requests.exceptions.RequestException as e:
-        print(f"    Error: Failed to fetch {url}: {e}", file=sys.stderr)
+        logging.error(f"    Error: Failed to fetch {url}: {e}")
         return None
     except pd.errors.ParserError as e_parse:
-         print(f"    Error: Failed to parse CSV from {url}: {e_parse}", file=sys.stderr)
-         return None # Indicates bad data in the CSV itself
+         logging.error(f"    Error: Failed to parse CSV from {url}: {e_parse}")
+         return None
     except Exception as e_gen:
-         print(f"    Error: Unexpected error processing {url}: {e_gen}", file=sys.stderr)
+         logging.error(f"    Error: Unexpected error processing {url}: {e_gen}")
          return None
 
 # --- Main Loading Function ---
 def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
     """
-    Loads raw FPL data (gameweeks, fixtures, players) for specified seasons
-    directly from the vaastav GitHub repo via HTTPS.
-
-    Args:
-        seasons_to_load (list): List of season strings (e.g., ['2023-24', '2024-25']).
-        current_season_gw_limit (int): Max gameweek for the current/latest season.
-
-    Returns:
-        dict: A dictionary containing DataFrames keyed by season and file type,
-              or empty dict/None if critical errors occur.
+    Loads raw FPL data for specified seasons.
+    For gameweeks where actual data CSV is missing (e.g., future GWs),
+    it constructs a "shell" DataFrame with player and fixture info.
     """
     all_data = {}
     if not seasons_to_load:
-        print("Error: No seasons specified for loading.", file=sys.stderr)
+        logging.error("Error: No seasons specified for loading.")
         return None
 
+    # current_season_gw_limit is used as the max_gw to fetch/construct for the current season
     current_season = seasons_to_load[-1]
-    print(f"--- Starting Raw Data Loading via HTTPS (Base URL: {RAW_DATA_BASE_URL}) ---")
+    logging.info(f"--- Starting Raw Data Loading via HTTPS (Base URL: {cleaned_base_url}) ---")
 
     for season in seasons_to_load:
-        print(f"\nProcessing season: {season}")
+        logging.info(f"\nProcessing season: {season}")
         all_data[season] = {}
 
-        # 1. Load players_raw.csv
-        print("  Loading players_raw...")
-        players_df = fetch_csv_from_url(f"{RAW_DATA_BASE_URL}/{season}/players_raw.csv")
-        if players_df is not None:
-             all_data[season]['players'] = players_df
+        # 1. Load players_raw.csv for the season (needed for player list for shells)
+        logging.info("  Loading players_raw...")
+        players_df_season = fetch_csv_from_url(f"{season}/players_raw.csv")
+        if players_df_season is None or players_df_season.empty:
+             logging.critical(f"  Critical Error: Failed to load players_raw for {season}. Cannot create GW shells.")
+             all_data[season]['players'] = pd.DataFrame()
+             all_data[season]['fixtures'] = pd.DataFrame()
+             all_data[season]['gws'] = pd.DataFrame()
+             continue # Skip to next season if this essential file is missing
+        all_data[season]['players'] = players_df_season
+
+        # 2. Load fixtures.csv for the season (needed for fixture info for shells)
+        logging.info("  Loading fixtures...")
+        fixtures_df_season = fetch_csv_from_url(f"{season}/fixtures.csv")
+        if fixtures_df_season is None or fixtures_df_season.empty:
+             logging.warning(f"  Warning: Failed to load fixtures for {season}. GW shells might be incomplete.")
+             all_data[season]['fixtures'] = pd.DataFrame()
         else:
-             print(f"  Critical Error: Failed to load players_raw for {season}", file=sys.stderr)
-             # Decide if processing can continue without player data
-             # return None # Or maybe continue? Depends on requirements
+             all_data[season]['fixtures'] = fixtures_df_season
 
-        # 2. Load fixtures.csv
-        print("  Loading fixtures...")
-        fixtures_df = fetch_csv_from_url(f"{RAW_DATA_BASE_URL}/{season}/fixtures.csv")
-        if fixtures_df is not None:
-             all_data[season]['fixtures'] = fixtures_df
-        else:
-             print(f"  Warning: Failed to load fixtures for {season}", file=sys.stderr)
-
-
-        # 3. Load Gameweek Data
-        print("  Loading gameweek data...")
+        # 3. Load or Construct Gameweek Data
+        logging.info("  Loading/Constructing gameweek data...")
         gws_list_for_season = []
-        # Determine max GW for this season
+        # max_gw is the gameweek up to which we need data (actual or shell)
         max_gw = 38 if season != current_season else current_season_gw_limit
+        logging.info(f"    Targeting GW data up to GW {max_gw} for season {season}...")
 
-        # Loop through individual gameweek files
-        print(f"    Fetching individual GW files up to GW {max_gw}...")
         for gw_num in range(1, max_gw + 1):
-            # Short delay between requests to be polite to the source server
-            # time.sleep(0.1)
-            gw_df = fetch_csv_from_url(f"{RAW_DATA_BASE_URL}/{season}/gws/gw{gw_num}.csv")
-            if gw_df is not None:
-                # Add gameweek column if missing (less likely with individual files)
-                if 'GW' not in gw_df.columns and 'gameweek' not in gw_df.columns:
-                    gw_df['gameweek'] = gw_num
-                elif 'GW' in gw_df.columns and 'gameweek' not in gw_df.columns:
-                    gw_df.rename(columns={'GW': 'gameweek'}, inplace=True)
-                # Ensure gameweek column is integer
-                if 'gameweek' in gw_df.columns:
-                     gw_df['gameweek'] = pd.to_numeric(gw_df['gameweek'], errors='coerce').fillna(gw_num).astype(int)
+            gw_data_path_suffix = f"{season}/gws/gw{gw_num}.csv"
+            gw_df_actual = fetch_csv_from_url(gw_data_path_suffix)
 
-                gws_list_for_season.append(gw_df)
-            # else: fetch_csv_from_url already printed warning/error
+            if gw_df_actual is not None and not gw_df_actual.empty:
+                # Actual data found
+                # Add/standardize gameweek column
+                if 'GW' not in gw_df_actual.columns and 'gameweek' not in gw_df_actual.columns:
+                    gw_df_actual['gameweek'] = gw_num
+                elif 'GW' in gw_df_actual.columns and 'gameweek' not in gw_df_actual.columns:
+                    gw_df_actual.rename(columns={'GW': 'gameweek'}, inplace=True)
+                if 'gameweek' in gw_df_actual.columns:
+                     gw_df_actual['gameweek'] = pd.to_numeric(gw_df_actual['gameweek'], errors='coerce').fillna(gw_num).astype(int)
+                gws_list_for_season.append(gw_df_actual)
+            else:
+                # Actual GW data not found (e.g., 404 for future GW or missing historical)
+                # Construct a "shell" DataFrame for this gameweek
+                logging.info(f"    Actual data for {gw_data_path_suffix} not found. Constructing shell for GW {gw_num}, Season {season}.")
+                
+                if players_df_season.empty or fixtures_df_season is None or fixtures_df_season.empty:
+                    logging.warning(f"    Cannot construct shell for GW {gw_num}: missing players or fixtures base data for season {season}.")
+                    continue
 
-        # Concatenate all loaded individual GW DataFrames for the season
+                shell_gw_fixtures = fixtures_df_season[fixtures_df_season['event'] == gw_num].copy()
+                if shell_gw_fixtures.empty:
+                    logging.warning(f"    No fixtures found for GW {gw_num} in season {season}. Cannot create shell rows for this GW.")
+                    continue
+
+                current_gw_shell_rows = []
+                for _, player_row in players_df_season.iterrows():
+                    player_id = player_row['id'] # Player's main FPL ID
+                    player_team_id = player_row['team'] # Player's current team ID
+
+                    player_fixture_details = shell_gw_fixtures[
+                        (shell_gw_fixtures['team_h'] == player_team_id) |
+                        (shell_gw_fixtures['team_a'] == player_team_id)
+                    ]
+
+                    if not player_fixture_details.empty:
+                        fixture_info = player_fixture_details.iloc[0]
+                        was_home = (fixture_info['team_h'] == player_team_id)
+                        opponent_team_id = fixture_info['team_a'] if was_home else fixture_info['team_h']
+                        
+                        shell_row = {
+                            'element': player_id,
+                            'name': player_row.get('web_name', f"Player_{player_id}"),
+                            'fixture': fixture_info['id'],
+                            'opponent_team': opponent_team_id,
+                            'was_home': was_home,
+                            'gameweek': gw_num,
+                            'season': season,
+                            'value': player_row.get('now_cost', np.nan), # FPL API 'value' is now_cost
+                            'cost': player_row.get('now_cost', np.nan) / 10.0 if pd.notna(player_row.get('now_cost')) else np.nan,
+                            # Initialize performance stats to NaN as they are unknown
+                            'total_points': np.nan, 'minutes': np.nan, 'goals_scored': np.nan,
+                            'assists': np.nan, 'clean_sheets': np.nan, 'goals_conceded': np.nan,
+                            'own_goals': np.nan, 'penalties_saved': np.nan, 'penalties_missed': np.nan,
+                            'yellow_cards': np.nan, 'red_cards': np.nan, 'saves': np.nan,
+                            'bonus': np.nan, 'bps': np.nan, 'influence': np.nan,
+                            'creativity': np.nan, 'threat': np.nan, 'ict_index': np.nan,
+                            'starts': np.nan, 'expected_goals': np.nan, 'expected_assists': np.nan,
+                            'expected_goal_involvements': np.nan, 'expected_goals_conceded': np.nan,
+                            'transfers_in': np.nan, 'transfers_out': np.nan, 'transfers_balance': np.nan,
+                            'selected': np.nan, # Raw selected count from GW file - keep as NaN for shell
+                            # team_h_score / team_a_score are fixture specific, will be merged in clean_merge
+                            # opponent_team_score / team_score can also be added from fixture
+                        }
+                        current_gw_shell_rows.append(shell_row)
+                
+                if current_gw_shell_rows:
+                    shell_df_for_gw = pd.DataFrame(current_gw_shell_rows)
+                    gws_list_for_season.append(shell_df_for_gw)
+                    logging.info(f"    Constructed shell for GW {gw_num}, Season {season} with {len(shell_df_for_gw)} players.")
+                else:
+                    logging.warning(f"    No player fixtures matched for GW {gw_num}, Season {season}. Shell not created.")
+
+        # Concatenate all actual and shell GW DataFrames for the season
         if gws_list_for_season:
-            print(f"  Concatenating {len(gws_list_for_season)} loaded gameweek DataFrames for {season}...")
+            logging.info(f"  Concatenating {len(gws_list_for_season)} GW DataFrames (actuals and shells) for {season}...")
             try:
                 all_data[season]['gws'] = pd.concat(gws_list_for_season, ignore_index=True)
-                print(f"  Concatenated GW data shape for {season}: {all_data[season]['gws'].shape}")
+                logging.info(f"  Concatenated GW data shape for {season}: {all_data[season]['gws'].shape}")
             except Exception as e_concat:
-                print(f"  Error during gameweek concatenation for {season}: {e_concat}", file=sys.stderr)
-                all_data[season]['gws'] = pd.DataFrame() # Assign empty DF on error
+                logging.error(f"  Error during GW concatenation for {season}: {e_concat}")
+                all_data[season]['gws'] = pd.DataFrame()
         else:
-             print(f"  Error: No individual gameweek files could be loaded for {season}.", file=sys.stderr)
-             all_data[season]['gws'] = pd.DataFrame() # Assign empty DF
+             logging.error(f"  Error: No gameweek data (actual or shell) could be processed for {season}.")
+             all_data[season]['gws'] = pd.DataFrame()
 
-    print("\n--- Raw Data Loading via HTTPS Finished ---")
-    # Filter out seasons where essential data (like GWS) might be missing entirely
-    valid_data = {s: d for s, d in all_data.items() if 'gws' in d and not d['gws'].empty}
+    logging.info("\n--- Raw Data Loading via HTTPS Finished ---")
+    # Final check for at least some valid GWS data
+    valid_data = {s: d for s, d in all_data.items() if d.get('gws') is not None and not d['gws'].empty}
     if not valid_data:
-         print("Error: Failed to load essential gameweek data for any specified season.", file=sys.stderr)
+         logging.error("Error: Failed to load essential gameweek data for any specified season.")
          return None
 
     return valid_data
 
-# Example of how run_scheduled_etl.py might use this:
+# --- Example of how run_scheduled_etl.py might use this (for direct testing of this file) ---
 if __name__ == '__main__':
-     print("Running load_raw_data_via_https directly for testing...")
-     # These would normally come from the calling script or env vars
-     test_seasons = ['2023-24'] # Test with just one season
-     test_gw_limit = 38 # Example limit for testing
+     logging.info("Running load_raw_data_via_https directly for testing...")
+     # These would normally come from the calling script or env vars from ECS Task Definition
+     test_seasons = ['2024-25'] # Test with current season
+     # Get current GW and predict next based on that logic
+     # For test, let's say FPL API determined last finished was 35, predict for 36
+     test_target_prediction_gw = 36
 
-     # You need to set the environment variable for testing locally:
-     # export RAW_DATA_BASE_URL='https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data'
+     # Ensure RAW_DATA_BASE_URL is set for this direct test
      if 'RAW_DATA_BASE_URL' not in os.environ:
-          print("Warning: RAW_DATA_BASE_URL environment variable not set for test.")
+          os.environ['RAW_DATA_BASE_URL'] = 'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data'
+          logging.info(f"Set RAW_DATA_BASE_URL for test: {os.environ['RAW_DATA_BASE_URL']}")
 
-     test_raw_data = load_raw_data_via_https(test_seasons, test_gw_limit)
+     test_raw_data = load_raw_data_via_https(test_seasons, test_target_prediction_gw)
 
-     if test_raw_data:
-          print("\nTest load successful. Data dictionary structure:")
+     if test_raw_data and test_raw_data.get(test_seasons[0], {}).get('gws') is not None:
+          logging.info("\nTest load successful. Data dictionary structure:")
           for season, data_types in test_raw_data.items():
-               print(f"  Season {season}:")
-               for dtype, df in data_types.items():
-                    print(f"    {dtype}: {df.shape}")
+               logging.info(f"  Season {season}:")
+               for dtype, df_content in data_types.items():
+                    if df_content is not None:
+                        logging.info(f"    {dtype}: {df_content.shape}")
+                        if dtype == 'gws' and not df_content.empty:
+                            # Check if our target prediction GW shell was created
+                            target_gw_data = df_content[df_content['gameweek'] == test_target_prediction_gw]
+                            if not target_gw_data.empty:
+                                logging.info(f"    Data for target GW {test_target_prediction_gw} (shell or actual):")
+                                logging.info(target_gw_data.head())
+                            else:
+                                logging.warning(f"    No data found for target GW {test_target_prediction_gw} in test output.")
+                    else:
+                        logging.info(f"    {dtype}: DataFrame is None")
      else:
-          print("\nTest load failed.")
+          logging.error("\nTest load failed or returned no GWS data.")
