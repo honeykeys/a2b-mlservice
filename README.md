@@ -14,22 +14,6 @@ This repository contains the Python-based machine learning service and data pipe
 * [Architecture & Pipeline Flow](#architecture--pipeline-flow)
 * [Key Features](#key-features)
 * [Technology Stack](#technology-stack)
-* [Local Development Setup](#local-development-setup)
-    * [Prerequisites](#prerequisites)
-    * [Cloning](#cloning)
-    * [Virtual Environment](#virtual-environment)
-    * [Installing Dependencies](#installing-dependencies)
-    * [Environment Variables (`.env.example`)](#environment-variables)
-    * [AWS Credentials Setup (for S3)](#aws-credentials-setup)
-* [Running the Scripts Locally](#running-the-scripts-locally)
-    * [Running the Full ETL & Training Pipeline (`run_etl.py`)](#running-the-full-etl--training-pipeline)
-    * [Running Individual Model Training Scripts](#running-individual-model-training-scripts)
-    * [Running the Prediction Generation Script (`run_scheduled_etl.py`)](#running-the-prediction-generation-script)
-* [Data Sources](#data-sources)
-* [Model Details & Performance (Brief)](#model-details--performance)
-* [Deployment (Conceptual)](#deployment-conceptual)
-* [Known Limitations & Future Work](#known-limitations--future-work)
-* [Author](#author)
 
 ---
 
