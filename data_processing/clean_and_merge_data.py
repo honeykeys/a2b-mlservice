@@ -196,22 +196,15 @@ def clean_and_merge_data(raw_data):
 
     return cleaned_merged_df
 
-
-# --- Example Usage Block (if running this file directly for testing) ---
-# You would typically call this function from run_etl.py
 if __name__ == '__main__':
-     # This block is for testing this script directly
-     # You would need to load raw data first or use sample data
      print("This script is intended to be called with loaded raw_data_dict.")
      print("Running with placeholder data structure for demonstration.")
-
-     # Create dummy data structure similar to Task 1 output
      dummy_raw_data = {
          '2023-24': {
              'players': pd.DataFrame({
                  'id': [1, 2, 3], 'element_type': [1, 2, 3], 'web_name': ['PlayerA', 'PlayerB', 'PlayerC'],
                  'team': [10, 11, 10], 'selected_by_percent': [5.5, 10.1, 2.3], 'chance_of_playing_next_round': [100, 75, None],
-                 'now_cost': [50, 65, 70] # Original cost/value before division
+                 'now_cost': [50, 65, 70]
              }),
              'fixtures': pd.DataFrame({
                  'id': [101, 102, 103], 'team_h_difficulty': [2, 3, 4], 'team_a_difficulty': [4, 3, 2],
@@ -220,13 +213,12 @@ if __name__ == '__main__':
              'gws': pd.DataFrame({
                  'element': [1, 2, 3, 1, 2, 3], 'fixture': [101, 101, 101, 102, 102, 102], 'gameweek': [1, 1, 1, 2, 2, 2],
                  'total_points': [2, 6, 1, 3, 0, 5], 'minutes': [90, 90, 20, 90, 0, 75], 'cost': [50, 65, 70, 51, 65, 71],
-                 'transfers_balance': [100, 500, -10, 200, -500, 150], 'selected': [55000, 101000, 23000, 60000, 95000, 25000], # Example raw selected count
+                 'transfers_balance': [100, 500, -10, 200, -500, 150], 'selected': [55000, 101000, 23000, 60000, 95000, 25000],
                  'was_home': [True, False, False, False, True, True], 'opponent_team': [11, 10, 11, 10, 11, 10],
-                 'value': [50, 65, 70, 51, 65, 71] # Example GW value
+                 'value': [50, 65, 70, 51, 65, 71]
              })
          }
      }
-     # Add more checks if needed
      if 'value' in dummy_raw_data['2023-24']['gws'].columns:
         print("Using 'value' from GW data as primary 'cost' source.")
         dummy_raw_data['2023-24']['gws']['cost'] = dummy_raw_data['2023-24']['gws']['value']

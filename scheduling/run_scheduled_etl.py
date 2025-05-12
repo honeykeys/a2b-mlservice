@@ -17,10 +17,7 @@ import requests # For FPL API call
 try:
     PROJECT_ROOT = Path(__file__).resolve().parent.parent
     sys.path.append(str(PROJECT_ROOT))
-    print(f"Project Root added to path: {PROJECT_ROOT}") # For local debugging
-
-    # Import your processing functions
-    # Assuming load_raw_data_via_https is in load_raw_data_scheduled.py now
+    print(f"Project Root added to path: {PROJECT_ROOT}")
     from scheduling.load_raw_data_scheduled import load_raw_data_via_https
     from data_processing.clean_and_merge_data import clean_and_merge_data
     from data_processing.feature_engineering import engineer_features
@@ -47,20 +44,12 @@ try:
     MODEL_POINTS_KEY = os.environ['MODEL_POINTS_KEY']
     MODEL_PRICE_KEY = os.environ['MODEL_PRICE_KEY']
     PREDICTIONS_S3_KEY_LATEST = os.environ['PREDICTIONS_S3_KEY_LATEST']
-    # Optional: If you also save processed data to S3, get its key
-    # PROCESSED_DATA_S3_KEY = os.environ.get('PROCESSED_DATA_S3_KEY')
     CURRENT_FPL_SEASON_FOLDER = os.environ.get('CURRENT_FPL_SEASON_FOLDER', '2024-25') # Example
-
-    # FPL API for GW detection
     FPL_BOOTSTRAP_API_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
     REQUEST_TIMEOUT_API = 15
-
-    # Feature columns (ensure these are exactly what your models were trained on)
     POINTS_FEATURE_COLUMNS = os.environ.get('POINTS_FEATURE_COLUMNS', 'minutes_lag_1,points_lag_1,fdr,was_home').split(',')
     PRICE_FEATURE_COLUMNS = os.environ.get('PRICE_FEATURE_COLUMNS', 'transfers_balance_lag_1,net_transfers_roll_3,selected_lag_1,points_lag_1,cost,chance_playing_prev_gw_forecast').split(',')
     IDENTIFIER_COLUMNS = os.environ.get('IDENTIFIER_COLUMNS', 'element,web_name,position,player_static_team,gameweek,season,cost').split(',')
-
-    # Local paths within the container's temporary storage
     LOCAL_MODEL_POINTS_PATH = Path('/tmp/points_model.joblib')
     LOCAL_MODEL_PRICE_PATH = Path('/tmp/price_model.joblib')
 
@@ -83,19 +72,15 @@ def get_fpl_gameweek_info():
         response.raise_for_status()
         data = response.json()
         current_gw, next_gw, latest_finished_gw = None, None, 0
-
         for event in data.get('events', []):
             if event.get('is_current') is True: current_gw = event.get('id')
             if event.get('is_next') is True: next_gw = event.get('id')
             if event.get('finished') is True and event.get('id', 0) > latest_finished_gw:
                 latest_finished_gw = event.get('id')
-        
-        # Determine prediction target
-        # Predict for the GW after the latest finished one for robust feature generation
         process_until_gw = latest_finished_gw if latest_finished_gw > 0 else current_gw
         predict_for_gw = (latest_finished_gw + 1) if latest_finished_gw > 0 else (current_gw if current_gw else None)
 
-        if not process_until_gw or not predict_for_gw or predict_for_gw > 38 : # Basic sanity check
+        if not process_until_gw or not predict_for_gw or predict_for_gw > 38 :
             logging.error(f"Could not reliably determine gameweeks. Current: {current_gw}, Next: {next_gw}, Finished: {latest_finished_gw}")
             return None
         
@@ -184,7 +169,7 @@ def main_etl_and_predict():
 
     # 4. Engineer Features
     logging.info("--- Engineering Features ---")
-    processed_df = engineer_features(merged_df) # This is the df that will be used for prediction
+    processed_df = engineer_features(merged_df) 
     if processed_df is None or processed_df.empty:
         raise Exception("Failed to engineer features.")
     logging.info(f"Feature engineering complete. Processed DF shape: {processed_df.shape}")
@@ -196,8 +181,7 @@ def main_etl_and_predict():
         logging.info(f"Found {len(gw_target_processed)} rows for GW {prediction_target_gw} in PROCESSED data.")
         if not gw_target_processed.empty:
             logging.info(f"Sample of PROCESSED GW {prediction_target_gw} data (cols: {gw_target_processed.columns.tolist()[:10]}...):\n{gw_target_processed.head().to_string()}")
-            # Check for NaNs in key lagged features for these rows
-            key_lagged_features = POINTS_FEATURE_COLUMNS + PRICE_FEATURE_COLUMNS # Use your actual feature lists
+            key_lagged_features = POINTS_FEATURE_COLUMNS + PRICE_FEATURE_COLUMNS
             actual_key_lagged = [f for f in key_lagged_features if f in gw_target_processed.columns and ('_lag_' in f or '_roll_' in f)]
             if actual_key_lagged:
                  logging.info(f"NaN check in key lagged features for GW {prediction_target_gw} in PROCESSED data:\n{gw_target_processed[actual_key_lagged].isnull().sum().to_string()}")
@@ -214,17 +198,16 @@ def main_etl_and_predict():
 
     # 6. Prepare Data for Prediction (for the target prediction gameweek)
     logging.info(f"--- Preparing Prediction Input for GW {prediction_target_gw} ---")
-    # The processed_df should contain rows for future GWS with features ready for prediction
     prediction_input_df = processed_df[processed_df['gameweek'] == prediction_target_gw].copy()
     if prediction_input_df.empty:
          raise Exception(f"No data found in processed_df for target prediction GW {prediction_target_gw}.")
 
     # Verify features and handle NaNs (basic fill - match training if different)
     X_predict_points = prediction_input_df[POINTS_FEATURE_COLUMNS].copy()
-    X_predict_points.fillna(0, inplace=True) # Ensure this matches training NaN strategy
+    X_predict_points.fillna(0, inplace=True)
     
     X_predict_price = prediction_input_df[PRICE_FEATURE_COLUMNS].copy()
-    X_predict_price.fillna(0, inplace=True) # Ensure this matches training NaN strategy
+    X_predict_price.fillna(0, inplace=True) 
 
     # 7. Generate Predictions
     logging.info("--- Generating Predictions ---")
@@ -239,7 +222,7 @@ def main_etl_and_predict():
     output_df['predicted_points'] = np.round(y_pred_points, 2)
     output_df['predicted_price_change'] = np.round(y_pred_price, 2)
     output_df['prediction_timestamp_utc'] = pd.Timestamp.utcnow().isoformat()
-    output_df['predicted_for_gameweek'] = prediction_target_gw # Add the target GW
+    output_df['predicted_for_gameweek'] = prediction_target_gw #
 
     output_json_string = output_df.to_json(orient='records', indent=2)
     s3_client = boto3.client('s3')

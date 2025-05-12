@@ -1,39 +1,27 @@
-# scheduling/load_raw_data_scheduled.py
-
 import pandas as pd
 import requests
-from io import StringIO # Used to read string data as a file
+from io import StringIO
 import os
 import sys
-import time # For potential retries/backoff, not actively used yet
+import time
 import logging
 import numpy as np
-
-# --- Configure Logging ---
-# Ensures logs go to stdout/stderr, which CloudWatch captures from Fargate
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(module)s - %(funcName)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-
-# --- Configuration ---
-# Read Base URL from environment variable set in Task Definition
 RAW_DATA_BASE_URL = os.environ.get(
     'RAW_DATA_BASE_URL',
     'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data'
 )
-REQUEST_TIMEOUT = 30 # seconds
-
-# Validate the Base URL early
+REQUEST_TIMEOUT = 30
 if not RAW_DATA_BASE_URL:
     logging.critical("FATAL: RAW_DATA_BASE_URL environment variable not set.")
     sys.exit("Exiting: Missing RAW_DATA_BASE_URL.")
 elif not RAW_DATA_BASE_URL.startswith(('http://', 'https://')):
      logging.critical(f"FATAL: RAW_DATA_BASE_URL is missing scheme (http/https): {RAW_DATA_BASE_URL}")
      sys.exit("Exiting: Invalid RAW_DATA_BASE_URL configuration.")
-
-# Clean base URL (remove trailing slash if present)
 cleaned_base_url = RAW_DATA_BASE_URL.rstrip('/')
 
 
@@ -44,7 +32,7 @@ def fetch_csv_from_url(file_path_suffix):
     logging.info(f"    Attempting to fetch: {url} ...")
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
 
         if not response.text:
              logging.warning(f"    Warning: Empty content received from {url}")
@@ -60,7 +48,7 @@ def fetch_csv_from_url(file_path_suffix):
     except requests.exceptions.HTTPError as http_err:
          if http_err.response.status_code == 404:
               logging.info(f"    Info: File not found (404) at {url}. Will attempt shell creation if needed.")
-              return None # Indicate file not found for shell creation logic
+              return None
          else:
               logging.error(f"    Error: HTTP error occurred: {http_err} for {url}")
               return None
@@ -85,8 +73,6 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
     if not seasons_to_load:
         logging.error("Error: No seasons specified for loading.")
         return None
-
-    # current_season_gw_limit is used as the max_gw to fetch/construct for the current season
     current_season = seasons_to_load[-1]
     logging.info(f"--- Starting Raw Data Loading via HTTPS (Base URL: {cleaned_base_url}) ---")
 
@@ -102,7 +88,7 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
              all_data[season]['players'] = pd.DataFrame()
              all_data[season]['fixtures'] = pd.DataFrame()
              all_data[season]['gws'] = pd.DataFrame()
-             continue # Skip to next season if this essential file is missing
+             continue
         all_data[season]['players'] = players_df_season
 
         # 2. Load fixtures.csv for the season (needed for fixture info for shells)
@@ -117,7 +103,6 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
         # 3. Load or Construct Gameweek Data
         logging.info("  Loading/Constructing gameweek data...")
         gws_list_for_season = []
-        # max_gw is the gameweek up to which we need data (actual or shell)
         max_gw = 38 if season != current_season else current_season_gw_limit
         logging.info(f"    Targeting GW data up to GW {max_gw} for season {season}...")
 
@@ -126,8 +111,6 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
             gw_df_actual = fetch_csv_from_url(gw_data_path_suffix)
 
             if gw_df_actual is not None and not gw_df_actual.empty:
-                # Actual data found
-                # Add/standardize gameweek column
                 if 'GW' not in gw_df_actual.columns and 'gameweek' not in gw_df_actual.columns:
                     gw_df_actual['gameweek'] = gw_num
                 elif 'GW' in gw_df_actual.columns and 'gameweek' not in gw_df_actual.columns:
@@ -136,8 +119,6 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
                      gw_df_actual['gameweek'] = pd.to_numeric(gw_df_actual['gameweek'], errors='coerce').fillna(gw_num).astype(int)
                 gws_list_for_season.append(gw_df_actual)
             else:
-                # Actual GW data not found (e.g., 404 for future GW or missing historical)
-                # Construct a "shell" DataFrame for this gameweek
                 logging.info(f"    Actual data for {gw_data_path_suffix} not found. Constructing shell for GW {gw_num}, Season {season}.")
                 
                 if players_df_season.empty or fixtures_df_season is None or fixtures_df_season.empty:
@@ -172,9 +153,8 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
                             'was_home': was_home,
                             'gameweek': gw_num,
                             'season': season,
-                            'value': player_row.get('now_cost', np.nan), # FPL API 'value' is now_cost
+                            'value': player_row.get('now_cost', np.nan),
                             'cost': player_row.get('now_cost', np.nan) / 10.0 if pd.notna(player_row.get('now_cost')) else np.nan,
-                            # Initialize performance stats to NaN as they are unknown
                             'total_points': np.nan, 'minutes': np.nan, 'goals_scored': np.nan,
                             'assists': np.nan, 'clean_sheets': np.nan, 'goals_conceded': np.nan,
                             'own_goals': np.nan, 'penalties_saved': np.nan, 'penalties_missed': np.nan,
@@ -184,9 +164,7 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
                             'starts': np.nan, 'expected_goals': np.nan, 'expected_assists': np.nan,
                             'expected_goal_involvements': np.nan, 'expected_goals_conceded': np.nan,
                             'transfers_in': np.nan, 'transfers_out': np.nan, 'transfers_balance': np.nan,
-                            'selected': np.nan, # Raw selected count from GW file - keep as NaN for shell
-                            # team_h_score / team_a_score are fixture specific, will be merged in clean_merge
-                            # opponent_team_score / team_score can also be added from fixture
+                            'selected': np.nan,
                         }
                         current_gw_shell_rows.append(shell_row)
                 
@@ -196,8 +174,6 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
                     logging.info(f"    Constructed shell for GW {gw_num}, Season {season} with {len(shell_df_for_gw)} players.")
                 else:
                     logging.warning(f"    No player fixtures matched for GW {gw_num}, Season {season}. Shell not created.")
-
-        # Concatenate all actual and shell GW DataFrames for the season
         if gws_list_for_season:
             logging.info(f"  Concatenating {len(gws_list_for_season)} GW DataFrames (actuals and shells) for {season}...")
             try:
@@ -211,24 +187,17 @@ def load_raw_data_via_https(seasons_to_load, current_season_gw_limit):
              all_data[season]['gws'] = pd.DataFrame()
 
     logging.info("\n--- Raw Data Loading via HTTPS Finished ---")
-    # Final check for at least some valid GWS data
     valid_data = {s: d for s, d in all_data.items() if d.get('gws') is not None and not d['gws'].empty}
     if not valid_data:
          logging.error("Error: Failed to load essential gameweek data for any specified season.")
          return None
 
     return valid_data
-
-# --- Example of how run_scheduled_etl.py might use this (for direct testing of this file) ---
 if __name__ == '__main__':
      logging.info("Running load_raw_data_via_https directly for testing...")
-     # These would normally come from the calling script or env vars from ECS Task Definition
-     test_seasons = ['2024-25'] # Test with current season
-     # Get current GW and predict next based on that logic
-     # For test, let's say FPL API determined last finished was 35, predict for 36
+     test_seasons = ['2024-25']
      test_target_prediction_gw = 36
 
-     # Ensure RAW_DATA_BASE_URL is set for this direct test
      if 'RAW_DATA_BASE_URL' not in os.environ:
           os.environ['RAW_DATA_BASE_URL'] = 'https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data'
           logging.info(f"Set RAW_DATA_BASE_URL for test: {os.environ['RAW_DATA_BASE_URL']}")
@@ -243,7 +212,6 @@ if __name__ == '__main__':
                     if df_content is not None:
                         logging.info(f"    {dtype}: {df_content.shape}")
                         if dtype == 'gws' and not df_content.empty:
-                            # Check if our target prediction GW shell was created
                             target_gw_data = df_content[df_content['gameweek'] == test_target_prediction_gw]
                             if not target_gw_data.empty:
                                 logging.info(f"    Data for target GW {test_target_prediction_gw} (shell or actual):")

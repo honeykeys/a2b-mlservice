@@ -1,6 +1,6 @@
 import pandas as pd
-import numpy as np # Needed for np.select
-import sys # Needed for error exit/prints
+import numpy as np
+import sys
 
 def engineer_features(df):
     """
@@ -23,18 +23,15 @@ def engineer_features(df):
         return None
 
     # --- 1. Ensure Required Base Columns Exist ---
-    # Add all columns needed for target/feature calculation BEFORE processing
     base_required_cols = [
         'element', 'season', 'gameweek', 'total_points', 'minutes', 'cost',
         'transfers_in', 'transfers_out', 'transfers_balance', 'selected_by_percent',
         'was_home', 'team_h_difficulty', 'team_a_difficulty', 'position', 'web_name',
-        'player_static_team', 'goals_scored', 'assists', 'ict_index' # Add others like goals_scored, assists, ict_index etc. if available and needed
+        'player_static_team', 'goals_scored', 'assists', 'ict_index'
     ]
     missing_cols = [col for col in base_required_cols if col not in df.columns]
-    # Allow some to be missing but warn (e.g., maybe ICT index wasn't in all files)
     if missing_cols:
         print(f"Warning: Potentially missing base columns for feature engineering: {missing_cols}", file=sys.stderr)
-        # Decide if any are absolutely critical and raise an error if so
 
 
     # --- 2. Sort Data Chronologically per Player ---
@@ -62,21 +59,15 @@ def engineer_features(df):
 
 
     # --- 5. Define Target Variable 2: Points ---
-    # The 'total_points' column itself serves as the target for points prediction,
-    # it just needs to be aligned with features from the *previous* gameweek.
     print("Identifying 'total_points' as points prediction target (alignment happens later).")
     target_col_points = 'total_points'
     if target_col_points not in df_sorted.columns:
          print(f"Error: Target column '{target_col_points}' not found.", file=sys.stderr)
-         # Maybe return None here if points prediction is essential?
+
 
     # --- 6. Engineer Lagged/Rolling Features (MODIFIED to use .transform()) ---
     print("Creating lagged & rolling features using .transform()...")
 
-    # Define player_group if not already defined just above
-    # player_group = df_sorted.groupby('element')
-
-    # Point Predictor Features (Examples using transform)
     if 'total_points' in df_sorted.columns:
         df_sorted['points_lag_1'] = player_group['total_points'].transform(lambda x: x.shift(1))
     if 'minutes' in df_sorted.columns:
@@ -88,10 +79,9 @@ def engineer_features(df):
     if 'ict_index' in df_sorted.columns:
         df_sorted['ict_index_lag_1'] = player_group['ict_index'].transform(lambda x: x.shift(1))
 
-    # Price Predictor Features (Examples using transform)
+    # Price Predictor Features
     if 'transfers_balance' in df_sorted.columns:
         df_sorted['transfers_balance_lag_1'] = player_group['transfers_balance'].transform(lambda x: x.shift(1))
-        # Calculate rolling transfers using transform. Roll first, then shift result.
         df_sorted['net_transfers_roll_3'] = player_group['transfers_balance'].transform(
             lambda x: x.rolling(window=3, min_periods=1).sum().shift(1)
         )
@@ -103,17 +93,13 @@ def engineer_features(df):
 
     # Lagged Status (if available)
     if 'chance_of_playing_next_round' in df_sorted.columns:
-        # Ensure it's numeric first if needed, handle potential non-numeric entries
         df_sorted['chance_of_playing_next_round'] = pd.to_numeric(df_sorted['chance_of_playing_next_round'], errors='coerce')
         df_sorted['chance_playing_prev_gw_forecast'] = player_group['chance_of_playing_next_round'].transform(lambda x: x.shift(1))
-        # Consider how NaNs introduced by coerce should be handled before lagging/using
-    # else: print("Warning: 'chance_of_playing_next_round' not found for lagging.")
 
     # --- End of Feature Engineering Section ---
 
     # --- 7. Engineer Fixture Difficulty Feature ---
     print("Creating Fixture Difficulty Rating (FDR) feature...")
-    # Ensure needed columns from merge exist
     if 'was_home' in df_sorted.columns and 'team_h_difficulty' in df_sorted.columns and 'team_a_difficulty' in df_sorted.columns:
         df_sorted['was_home'] = pd.to_numeric(df_sorted['was_home'], errors='coerce').fillna(-1).astype(int) # Ensure 0/1
         conditions_fdr = [
@@ -131,15 +117,9 @@ def engineer_features(df):
 
 
     # --- 8. Handle NaNs Introduced ONLY by Lagging/Rolling ---
-    # Identify all columns created by shifting or rolling (these define the initial rows to drop)
-    # Ensure this list includes key features needed for BOTH model types later
     essential_lagged_cols = [col for col in df_sorted.columns if '_lag_' in col or '_roll_' in col]
     df_processed = df_sorted.copy() # Use the DataFrame with all rows
     print(f"Shape BEFORE any NaN drop in engineer_features: {df_processed.shape}")
-    # If you still want to drop very early historical NaNs for cleanliness, you could do:
-    # if essential_lagged_cols:
-    #     df_processed.dropna(subset=essential_lagged_cols, how='all', inplace=True) # Drop if ALL are NaN
-    #     logging.info(f"Shape AFTER dropping rows where ALL essential lags are NaN: {df_processed.shape}")
 
     if df_processed.empty:
         print("Error: DataFrame is empty after potential minimal NaN handling.", file=sys.stderr)
